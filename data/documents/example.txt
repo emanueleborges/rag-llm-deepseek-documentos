@@ -1,0 +1,146 @@
+# Exemplo de Documento para Teste do RAG Agent
+
+## O que é RAG (Retrieval-Augmented Generation)?
+
+RAG é uma técnica poderosa que combina a capacidade generativa de modelos de linguagem com sistemas de recuperação de informações. Esta abordagem revoluciona como os sistemas de IA podem fornecer respostas precisas e contextualizadas.
+
+### Como o RAG Funciona
+
+1. **Recuperação (Retrieval)**: O sistema busca documentos relevantes de uma base de conhecimento
+2. **Contexto (Augmentation)**: Os documentos recuperados são adicionados ao contexto
+3. **Geração (Generation)**: O modelo de linguagem gera respostas baseadas no contexto expandido
+
+### Benefícios do RAG
+
+- **Precisão Aumentada**: Respostas baseadas em dados específicos
+- **Sem Alucinações**: Reduz drasticamente informações inventadas
+- **Conhecimento Atualizado**: Pode usar informações recentes
+- **Explicabilidade**: Mostra as fontes das respostas
+- **Custo-Benefício**: Mais eficiente que fine-tuning
+
+### Casos de Uso
+
+- Assistentes de suporte ao cliente
+- Sistemas de QA para documentação
+- Pesquisa e análise de documentos
+- Chatbots baseados em conhecimento
+- Análise de conformidade regulatória
+
+## LangChain: Simplificando o Desenvolvimento
+
+LangChain é um framework que simplifica o desenvolvimento de aplicações baseadas em LLMs (Large Language Models).
+
+### Componentes Principais
+
+#### 1. Chains (Cadeias)
+Combinam múltiplos passos para executar tarefas complexas:
+- LLMChain: Entrada única → LLM → Saída
+- SequentialChain: Múltiplas cadeias encadeadas
+- TransformChain: Transformação de dados entre passos
+
+#### 2. Memory (Memória)
+Permite que o sistema retenha informações entre interações:
+- ConversationBufferMemory: Mantém histórico completo
+- ConversationSummaryMemory: Resumo das conversas
+- EntityMemory: Armazena fatos sobre entidades
+
+#### 3. Agents (Agentes)
+Sistemas de tomada de decisão que determinam qual ferramenta usar:
+- Zero-shot Agents: Baseados em raciocínio puro
+- ReAct Agents: Combinam raciocínio e ação
+- Custom Agents: Implementação personalizada
+
+#### 4. Tools (Ferramentas)
+Ferramentas externas que os agentes podem usar:
+- Calculadoras
+- Busca na web
+- APIs customizadas
+- Bancos de dados
+
+### Exemplo de Uso Básico
+
+```python
+from langchain import OpenAI, LLMChain, PromptTemplate
+
+# Definir prompt
+prompt = PromptTemplate(
+    input_variables=["topic"],
+    template="Explique {topic} em termos simples"
+)
+
+# Criar cadeia
+llm = OpenAI(model_name="gpt-3.5-turbo")
+chain = LLMChain(llm=llm, prompt=prompt)
+
+# Executar
+resultado = chain.run("machine learning")
+print(resultado)
+```
+
+## Embeddings e Vector Stores
+
+### O que são Embeddings?
+
+Embeddings são representações numéricas de texto em um espaço vetorial de alta dimensão. Permitem comparações semânticas entre textos.
+
+### Vector Stores
+
+Bancos de dados especializados em armazenar e recuperar embeddings:
+- **ChromaDB**: Leve e fácil de usar (usado neste projeto)
+- **FAISS**: Otimizado para busca de similaridade
+- **Pinecone**: Serviço em nuvem gerenciado
+- **Weaviate**: Com suporte a schema
+
+## Deepseek: Uma Alternativa Moderna
+
+Deepseek oferece modelos de linguagem de alta qualidade com:
+- Custo-benefício superior
+- Latência baixa
+- Múltiplos modelos especializados
+- API simples e confiável
+
+### Modelos Disponíveis
+
+- `deepseek-chat`: Conversação geral
+- `deepseek-coder`: Código e programação
+- `deepseek-reasoning`: Raciocínio avançado (Beta)
+
+## Arquitetura de Produção
+
+Para um sistema RAG em produção:
+
+1. **Ingestão de Dados**: Pipeline automática para novos documentos
+2. **Versionamento**: Controle de versão dos documentos e embeddings
+3. **Cache**: Cache de queries frequentes
+4. **Monitoramento**: Logs e métricas de performance
+5. **A/B Testing**: Comparar diferentes prompts e modelos
+6. **Rate Limiting**: Proteção contra abuso
+7. **Segurança**: Autenticação e autorização
+
+## Boas Práticas
+
+### Para Document Processing
+- Limpar e normalizar texto
+- Usar tamanhos apropriados de chunks (800-1000 tokens)
+- Manter overlap entre chunks
+- Preservar metadados dos documentos
+
+### Para Prompts
+- Ser específico e claro
+- Incluir exemplos (few-shot learning)
+- Usar role-play quando apropriado
+- Testar diferentes variações
+
+### Para Retrieval
+- Ajustar o número de documentos recuperados
+- Usar diferentes estratégias de busca
+- Implementar reranking
+- Monitorar a qualidade das recuperações
+
+## Conclusão
+
+RAG com LangChain, Deepseek e ChromaDB oferece uma solução completa e eficiente para construir sistemas de QA inteligentes. Esta combinação de tecnologias permite criar aplicações que combinam o melhor dos mundos: a flexibilidade dos LLMs modernos com a precisão de sistemas de recuperação de documentos.
+
+---
+
+*Este é um documento de exemplo para testar seu sistema RAG. Substitua por seus documentos reais para melhores resultados.*
