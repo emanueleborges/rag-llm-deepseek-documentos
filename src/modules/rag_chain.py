@@ -17,14 +17,28 @@ from src.modules.vector_store import VectorStoreManager
 SYSTEM_PROMPT = """Você é um assistente especializado no Código de Defesa do Consumidor (CDC), Lei nº 8.078/1990, e normas correlatas.
 
 Regras:
-- Use APENAS o contexto abaixo (trechos do CDC e legislação indexada).
+- Use PRINCIPALMENTE o contexto abaixo (trechos do CDC e legislação indexada).
 - Responda em português do Brasil, com títulos e tópicos organizados.
-- Se o contexto NÃO tratar do tema específico da pergunta (ex.: reclamação, compra online, arrependimento), responda EXATAMENTE que não há trechos suficientes no material indexado sobre aquele tema e não invente procedimentos ou artigos.
-- Para resumos gerais do CDC: sintetize com os trechos disponíveis (consumidor, fornecedor, direitos, cláusulas abusivas, etc.).
+- Para resumos gerais do CDC: sintetize com os trechos disponíveis.
 - Cite artigos somente quando aparecerem no contexto.
-- Não use conhecimento externo ao contexto. Lacunas específicas: diga o que não consta nos trechos.
+- Se o contexto for parcial, responda com o que houver nos trechos.
 
 Contexto:
+{context}"""
+
+FALLBACK_SYSTEM_PROMPT = """Você é um assistente especializado em direito do consumidor, CDC (Lei 8.078/1990) e atuação do Procon no Brasil.
+
+A pergunta do usuário NÃO está respondida de forma completa nos trechos do CDC indexados abaixo (podem ser vazios ou só tangenciar o tema).
+
+Instruções:
+- Responda em português do Brasil, de forma clara, prática e organizada (títulos, listas e passos quando couber).
+- Complemente com conhecimento geral sobre CDC, Procon, reclamações e defesa do consumidor.
+- Use os trechos parciais do CDC quando forem úteis; deixe claro o que veio do CDC indexado.
+- Não invente número de artigo do CDC que não apareça no contexto.
+- Para documentos e procedimentos do Procon: informe documentos usualmente exigidos no Brasil e avise que podem variar por estado/município — recomende confirmar no site do Procon local.
+- Seja útil: o usuário espera orientação concreta, não apenas “não consta no material”.
+
+Trechos parciais do CDC indexado (podem ser insuficientes):
 {context}"""
 
 _QUERY_STOPWORDS = frozenset({
@@ -33,8 +47,23 @@ _QUERY_STOPWORDS = frozenset({
     "uns", "das", "dos", "que", "com", "por", "nos", "nas", "the", "and",
 })
 
+# Marcadores no texto recuperado que indicam resposta procedimental de verdade
+_INTENT_MARKERS = {
+    "documentation": (
+        "documento", "documentação", "documentacao", "cpf", "rg", "comprovante",
+        "nota fiscal", "contrato", "formulário", "formulario", "petição", "peticao",
+        "cópia", "copia", "procuração", "procuracao", "identidade", "anexar",
+        "juntar", "apresentar documento",
+    ),
+    "complaint_procedure": (
+        "reclamação formal", "reclamacao formal", "protocolo de reclamação",
+        "formulário de reclamação", "formulario de reclamacao", "proconsumidor",
+        "atendimento presencial", "agendamento", "registro de reclamação",
+    ),
+}
+
 _TOPIC_SYNONYMS = {
-    "reclamação": ("reclama", "reclamação", "reclamacao", "ouvidoria", "denúncia", "denuncia", "procon", "atendimento"),
+    "reclamação": ("reclama", "reclamação", "reclamacao", "ouvidoria", "denúncia", "denuncia", "atendimento"),
     "reclamacao": ("reclama", "reclamação", "reclamacao", "ouvidoria"),
     "documentação": ("document", "formal", "petição", "peticao", "requerimento", "notificação", "notificacao"),
     "documentacao": ("document", "formal", "petição", "peticao", "requerimento"),
@@ -194,6 +223,10 @@ class RAGChain:
             ("system", SYSTEM_PROMPT),
             ("human", "Pergunta: {question}\n\nResposta:"),
         ])
+        self.fallback_prompt = ChatPromptTemplate.from_messages([
+            ("system", FALLBACK_SYSTEM_PROMPT),
+            ("human", "Pergunta: {question}\n\nResposta:"),
+        ])
 
         logger.info("RAG Chain initialized successfully")
 
@@ -282,12 +315,41 @@ class RAGChain:
                     names.append(name)
         return names or ["desconhecido"]
 
-    def _assess_context_relevance(
+    def _detect_question_intents(self, question: str) -> set:
+        """Intenções que exigem detalhe procedimental no contexto recuperado."""
+        q = question.lower()
+        intents = set()
+        if re.search(
+            r"\b(documento|documentação|documentacao|anex|juntar|apresentar|comprovante)\b",
+            q,
+        ):
+            intents.add("documentation")
+        if re.search(
+            r"\b(procon|reclamação|reclamacao|reclamar|ouvidoria|denúncia|denuncia)\b",
+            q,
+        ):
+            intents.add("complaint_procedure")
+        return intents
+
+    def _context_supports_intents(self, combined: str, intents: set) -> bool:
+        if not intents:
+            return True
+        for intent in intents:
+            markers = _INTENT_MARKERS.get(intent, ())
+            if not any(marker in combined for marker in markers):
+                return False
+        return True
+
+    def _assess_retrieval_mode(
         self, question: str, docs: List[Document]
-    ) -> tuple[bool, str]:
-        """Check if retrieved chunks likely support answering the question."""
+    ) -> tuple[str, str]:
+        """
+        Define modo de resposta:
+        - strict: só contexto CDC (RAG)
+        - fallback: Deepseek complementa quando o índice não cobre a pergunta
+        """
         if not docs:
-            return False, "Nenhum trecho recuperado da base."
+            return "fallback", "Nenhum trecho recuperado — usando Deepseek."
 
         combined = "\n".join(d.page_content.lower() for d in docs)
 
@@ -296,50 +358,67 @@ class RAGChain:
             "código de defesa", "codigo de defesa", "lei nº 8.078",
         )
         if not any(m in combined for m in cdc_markers):
-            return False, "Trechos recuperados não parecem ser do CDC."
+            return "fallback", "Trechos não parecem CDC — usando Deepseek."
+
+        if self._is_overview_question(question):
+            return "strict", "Pergunta de visão geral do CDC."
+
+        intents = self._detect_question_intents(question)
+        if intents and not self._context_supports_intents(combined, intents):
+            labels = {
+                "documentation": "documentação exigida",
+                "complaint_procedure": "procedimento de reclamação/Procon",
+            }
+            missing = ", ".join(labels.get(i, i) for i in sorted(intents))
+            return (
+                "fallback",
+                f"CDC indexado não detalha ({missing}) — complemento Deepseek.",
+            )
 
         q_terms = [
             t for t in self._tokenize(question)
             if len(t) >= 4 and t not in _QUERY_STOPWORDS
         ]
 
-        if self._is_overview_question(question):
-            return True, "Pergunta de visão geral do CDC."
-
         if q_terms:
             hits = sum(1 for t in q_terms if t in combined)
-            if hits >= 1:
-                return True, f"{hits} termo(s) da pergunta no contexto."
+            if hits >= 2:
+                return "strict", f"{hits} termo(s) da pergunta no contexto."
 
             for term in q_terms:
                 for syn in _TOPIC_SYNONYMS.get(term, ()):
                     if syn in combined:
-                        return True, f"Tema relacionado ({syn}) no contexto."
+                        return "strict", f"Tema relacionado ({syn}) no contexto."
+
+            if hits == 1 and not intents:
+                return "strict", "1 termo da pergunta no contexto."
+
+        if intents:
+            return "fallback", "Menção ao tema sem detalhe procedimental — Deepseek."
 
         return (
-            False,
-            "Nenhum trecho indexado aborda diretamente o tema da pergunta.",
+            "fallback",
+            "Tema não coberto pelos trechos indexados — complemento Deepseek.",
         )
 
-    def _build_refusal_answer(
-        self, question: str, docs: List[Document], reason: str
+    def _generate_answer(
+        self, question: str, docs: List[Document], mode: str
     ) -> str:
-        files = ", ".join(self._source_filenames(docs)) if docs else "nenhum"
-        return (
-            "Não encontrei trechos suficientes no **CDC indexado** para responder com "
-            f"segurança sobre: *{question.strip()}*.\n\n"
-            f"**Motivo:** {reason}\n\n"
-            f"**Trechos consultados:** {len(docs)} (arquivo(s): {files}).\n\n"
-            "Sugestões:\n"
-            "- Reformule a pergunta com termos do CDC (ex.: artigo, direito de arrependimento, reclamação);\n"
-            "- Use **Reindexar Documentos** na barra lateral;\n"
-            "- Verifique se o PDF está em `data/documents/`."
+        context = (
+            self._format_context(docs)
+            if docs
+            else "(Nenhum trecho relevante recuperado da base indexada.)"
         )
+        template = self.prompt if mode == "strict" else self.fallback_prompt
+        messages = template.format_messages(context=context, question=question)
+        return str(self.llm.invoke(messages))
 
-    def _build_meta(self, docs: List[Document], grounded: bool, note: str) -> dict:
+    def _build_meta(self, docs: List[Document], mode: str, note: str) -> dict:
         files = self._source_filenames(docs)
         return {
-            "grounded": grounded,
+            "grounded": mode == "strict",
+            "fallback": mode == "fallback",
+            "mode": mode,
             "sources_count": len(docs),
             "source_files": files,
             "source_label": ", ".join(files),
@@ -366,30 +445,10 @@ class RAGChain:
             logger.info(f"Processing query: {question}")
 
             docs = self._retrieve_documents(question)
-            grounded, relevance_note = self._assess_context_relevance(question, docs)
-            meta = self._build_meta(docs, grounded, relevance_note)
+            mode, relevance_note = self._assess_retrieval_mode(question, docs)
+            meta = self._build_meta(docs, mode, relevance_note)
 
-            if not grounded:
-                answer_str = self._build_refusal_answer(question, docs, relevance_note)
-                logger.info(
-                    "Query refused (insufficient context) | sources=%s | %s",
-                    len(docs),
-                    relevance_note,
-                )
-                logger.info("Answer:\n%s", answer_str)
-                return {
-                    "answer": answer_str,
-                    "sources": [
-                        {"content": doc.page_content, "metadata": doc.metadata}
-                        for doc in docs
-                    ],
-                    "meta": meta,
-                }
-
-            context = self._format_context(docs)
-            messages = self.prompt.format_messages(context=context, question=question)
-            answer = self.llm.invoke(messages)
-            answer_str = str(answer)
+            answer_str = self._generate_answer(question, docs, mode)
 
             max_chars = settings.log_answer_max_chars
             logged_answer = answer_str
@@ -397,8 +456,9 @@ class RAGChain:
                 logged_answer = f"{logged_answer[:max_chars]}... [truncado no log]"
 
             logger.info(
-                "Query processed successfully | sources=%s | grounded=true | %s",
+                "Query processed | sources=%s | mode=%s | %s",
                 len(docs),
+                mode,
                 relevance_note,
             )
             logger.info("Answer:\n%s", logged_answer)
@@ -426,6 +486,12 @@ class RAGChain:
                 results.append({
                     "answer": "Erro ao processar a pergunta.",
                     "sources": [],
-                    "meta": {"grounded": False, "sources_count": 0, "source_files": []},
+                    "meta": {
+                        "grounded": False,
+                        "fallback": True,
+                        "mode": "fallback",
+                        "sources_count": 0,
+                        "source_files": [],
+                    },
                 })
         return results

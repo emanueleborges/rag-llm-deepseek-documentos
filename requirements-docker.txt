@@ -1,0 +1,22 @@
+# Dependências de produção (imagem Docker)
+python-dotenv==1.0.0
+pydantic==2.5.0
+
+# LangChain (versões alinhadas — evita conflito langsmith com langchain 0.1.x)
+langchain-core==0.2.43
+langchain-community==0.2.19
+langchain-text-splitters==0.2.4
+
+openai==1.3.5
+requests==2.31.0
+chromadb==0.4.18
+pypdf==3.17.1
+python-docx==0.8.11
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic-settings==2.1.0
+streamlit==1.28.1
+beautifulsoup4==4.12.2
+lxml==4.9.3
+typing-extensions==4.8.0
+sentence-transformers>=2.2.0

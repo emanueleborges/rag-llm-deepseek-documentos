@@ -30,7 +30,7 @@ Um sistema inteligente de Perguntas e Respostas (Q&A) que combina **Retrieval-Au
                    │
 ┌──────────────────▼──────────────────────────┐
 │      RAG Chain (LangChain)                  │
-│  Orquestração de retrieval + generation    │
+│  Orquestração de retrieval + generation     │
 └───────┬──────────────────────┬──────────────┘
         │                      │
 ┌───────▼────────┐    ┌────────▼──────────┐
@@ -323,6 +323,50 @@ for q in questions:
     print(f"Fontes: {len(result['sources'])} documentos")
 ```
 
+## 🐳 Docker
+
+### Pré-requisitos
+
+- [Docker](https://docs.docker.com/get-docker/) e Docker Compose v2
+- Arquivo `.env` com `DEEPSEEK_API_KEY` (copie de `.env.example`)
+
+### Subir a aplicação
+
+```bash
+# Na raiz do projeto
+cp .env.example .env   # se ainda não tiver .env
+# Edite .env e defina DEEPSEEK_API_KEY
+
+# Interface Streamlit + API FastAPI
+docker compose up --build -d
+
+# Apenas a interface (build da imagem uma vez via serviço api)
+docker compose build api && docker compose up -d ui
+
+# Apenas a API
+docker compose up --build -d api
+```
+
+**URLs:**
+
+| Serviço | URL |
+|---------|-----|
+| Streamlit (UI) | http://localhost:8501 |
+| API | http://localhost:8000 |
+| Swagger | http://localhost:8000/docs |
+
+Documentos em `data/documents/` e o índice vetorial em `data/vector_store/` ficam no host (volumes bind). O modelo de embeddings é incluído na imagem no build.
+
+### Comandos úteis
+
+```bash
+docker compose logs -f ui      # logs da interface
+docker compose logs -f api     # logs da API
+docker compose down            # parar e remover containers
+```
+
+A primeira subida pode levar alguns minutos (build com PyTorch e sentence-transformers). Recomenda-se **4 GB+ de RAM** para os containers.
+
 ## 🐛 Troubleshooting
 
 ### "API key not provided"
@@ -342,6 +386,13 @@ for q in questions:
 - Verifique sua conexão com a internet
 - Confirme que a API key é válida
 - Verifique se você tem créditos suficientes na conta
+
+### Docker: build lento ou container reinicia
+- O build baixa PyTorch e o modelo de embeddings; aguarde a conclusão
+- Confirme que `.env` existe e contém `DEEPSEEK_API_KEY`
+- Verifique logs: `docker compose logs api` ou `docker compose logs ui`
+- Em máquinas com pouca RAM, suba só a UI: `docker compose build api && docker compose up -d ui`
+- Erro `rag-agent:latest: already exists` ao buildar: remova builds duplicados (só `api` faz build) e rode `docker compose build api`
 
 ## 📚 Recursos Adicionais
 

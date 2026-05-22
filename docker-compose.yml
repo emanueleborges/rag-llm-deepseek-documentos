@@ -1,0 +1,57 @@
+services:
+  api:
+    build: .
+    image: rag-agent:latest
+    container_name: rag-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      API_WORKERS: 1
+      VECTOR_STORE_PATH: /app/data/vector_store
+      DOCUMENTS_PATH: /app/data/documents
+      LOG_FILE: /app/logs/rag_agent.log
+    volumes:
+      - ./data/documents:/app/data/documents
+      - ./data/vector_store:/app/data/vector_store
+      - ./logs:/app/logs
+    command:
+      - sh
+      - -c
+      - |
+        python -c "import langchain_text_splitters" 2>/dev/null || pip install --no-cache-dir langchain-core==0.2.43 langchain-community==0.2.19 langchain-text-splitters==0.2.4
+        exec python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  ui:
+    image: rag-agent:latest
+    container_name: rag-ui
+    restart: unless-stopped
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    env_file:
+      - .env
+    environment:
+      VECTOR_STORE_PATH: /app/data/vector_store
+      DOCUMENTS_PATH: /app/data/documents
+      LOG_FILE: /app/logs/rag_agent.log
+    volumes:
+      - ./src:/app/src:ro
+      - ./data/documents:/app/data/documents
+      - ./data/vector_store:/app/data/vector_store
+      - ./logs:/app/logs
+    command:
+      - sh
+      - -c
+      - |
+        python -c "import langchain_text_splitters" 2>/dev/null || pip install --no-cache-dir langchain-core==0.2.43 langchain-community==0.2.19 langchain-text-splitters==0.2.4
+        exec streamlit run src/ui/app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false
