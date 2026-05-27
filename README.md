@@ -26,12 +26,6 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Para o ambiente completo com Docker e extras opcionais:
-
-```bash
-pip install -r requirements-docker.txt
-```
-
 ### 4. Configure as variáveis de ambiente
 
 ```bash
@@ -142,7 +136,6 @@ pip install langgraph chainlit langfuse ragas sentence-transformers pymupdf pyte
 
 ## 📝 Observações
 
-- Use `requirements.txt` para o setup local básico.
-- Use `requirements-docker.txt` para um ambiente mais completo e com Docker.
+- Use `requirements.txt` para o setup local básico e completo.
 - Configure `.env` antes de iniciar a API.
 - Ajuste `API_HOST` e `API_PORT` no `.env` se necessário.

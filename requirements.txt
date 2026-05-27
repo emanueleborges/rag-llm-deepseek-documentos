@@ -1,13 +1,29 @@
-# Runtime completo (local) — inclui Docker mínimo + extras opcionais
--r requirements-docker.txt
+python-dotenv==1.0.0
+pydantic>=2.7.4
+pydantic-settings>=2.1.0
+typing-extensions>=4.8.0
 
-# Embeddings locais sem Ollama (ONNX ~150 MB extra no build)
-fastembed>=0.3.0
-
-# API FastAPI (profile api no Docker instala no startup)
 fastapi>=0.115.3,<0.116
 uvicorn>=0.25.0,<0.35
 starlette>=0.41.2,<0.42
 
-# Extras dev/eval (instale só se precisar):
-# pip install langgraph chainlit langfuse ragas sentence-transformers pymupdf pytest black
+langchain-core==0.2.43
+langchain-text-splitters==0.2.4
+langchain-ollama>=0.1.0,<0.3
+langgraph>=0.1.0
+
+httpx>=0.25.0,<0.28
+requests==2.31.0
+
+chromadb==0.4.18
+pypdf==3.17.1
+pymupdf>=1.22.0
+rank-bm25>=0.2.2
+
+streamlit==1.28.1
+chainlit>=1.3.2
+fastembed>=0.3.0
+sentence-transformers>=2.2.2
+
+# Dependências adicionais úteis para recursos opcionais
+# pip install chainlit langfuse ragas pytest black
