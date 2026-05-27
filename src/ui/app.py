@@ -14,6 +14,13 @@ from src.logger import logger
 APP_NAME = "RAG Agent"
 APP_TAGLINE = "Assistente CDC com recuperação de documentos (RAG)"
 
+
+def llm_display_name() -> str:
+    from src.modules.llm_factory import LLMFactory
+
+    return LLMFactory.display_name()
+
+
 UI_DIR = Path(__file__).parent
 AVATAR_USER = UI_DIR / "assets" / "avatar_user.png"
 AVATAR_ASSISTANT = UI_DIR / "assets" / "avatar_assistant.png"
@@ -516,21 +523,25 @@ def render_rag_badge(meta: dict | None) -> None:
     count = meta.get("sources_count", 0)
     files = meta.get("source_label") or ", ".join(meta.get("source_files", []))
     note = meta.get("retrieval_note")
+    trace = meta.get("graph_trace")
+    trace_html = ""
+    if trace:
+        trace_html = f'<br><small style="opacity:.6">Agente: {" → ".join(trace)}</small>'
 
     if meta.get("grounded"):
         extra = f" — <em>{files}</em>" if files else ""
         note_html = f'<br><small style="opacity:.75">Recuperação: {note}</small>' if note else ""
         st.markdown(
             f'<div class="rag-pill rag-pill-ok">📎 Baseado em <strong>{count}</strong> '
-            f"trecho(s) do CDC{extra}{note_html}</div>",
+            f"trecho(s) do CDC{extra}{note_html}{trace_html}</div>",
             unsafe_allow_html=True,
         )
     elif meta.get("fallback"):
         extra = f" — <em>{files}</em>" if files else ""
         note_html = f'<br><small style="opacity:.75">{note}</small>' if note else ""
         st.markdown(
-            f'<div class="rag-pill rag-pill-fallback">✨ Complemento <strong>Deepseek</strong> '
-            f"({count} trecho(s) CDC consultado(s){extra}){note_html}</div>",
+            f'<div class="rag-pill rag-pill-fallback">✨ Complemento <strong>{llm_display_name()}</strong> '
+            f"({count} trecho(s) CDC consultado(s){extra}){note_html}{trace_html}</div>",
             unsafe_allow_html=True,
         )
     else:
@@ -597,21 +608,53 @@ def _ensure_user_message_in_history(user_input: str) -> None:
     st.session_state.chat_history.append({"role": "user", "content": user_input})
 
 
+def _conversation_context(max_turns: int = 4) -> str:
+    """Memória curta: últimos turnos para o grafo LangGraph."""
+    hist = st.session_state.chat_history
+    if not hist:
+        return ""
+    lines = []
+    for msg in hist[-max_turns * 2 :]:
+        role = "Usuário" if msg["role"] == "user" else "Assistente"
+        content = (msg.get("content") or "")[:300]
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
 def render_assistant_typing(user_input: str) -> None:
-    """Spinner e resposta na bolha do assistente, logo abaixo da pergunta."""
+    """Busca no CDC e gera resposta com streaming (menos espera percebida)."""
     with st.chat_message("assistant", avatar=chat_avatar("assistant")):
-        with st.spinner("Consultando CDC e Deepseek..."):
+        rag = st.session_state.rag_chain
+        conv = _conversation_context()
+
+        with st.spinner("Buscando trechos no CDC..."):
             try:
-                result = st.session_state.rag_chain.query(user_input)
+                ctx = rag.prepare_retrieval(user_input, conv)
             except Exception as e:
                 _append_assistant_error(e)
                 st.error(f"Erro ao processar pergunta: {e}")
                 return
 
+        meta = ctx.get("meta", {})
+        sources = ctx.get("sources", [])
+        render_rag_badge(meta)
+
+        placeholder = st.empty()
+        full_answer = ""
+        try:
+            for token in rag.stream_answer_from_context(ctx):
+                full_answer += token
+                placeholder.markdown(full_answer + "▌")
+            placeholder.markdown(full_answer)
+        except Exception as e:
+            _append_assistant_error(e)
+            st.error(f"Erro ao gerar resposta: {e}")
+            return
+
+        result = {"answer": full_answer, "sources": sources, "meta": meta}
         _append_assistant_reply(result)
-        render_rag_badge(result.get("meta"))
-        st.markdown(result["answer"])
-        render_sources_expander(result.get("sources", []), preview_len=200)
+        render_sources_expander(sources, preview_len=200)
 
 
 def render_sources_expander(sources: list, preview_len: int = 300) -> None:
@@ -621,17 +664,23 @@ def render_sources_expander(sources: list, preview_len: int = 300) -> None:
     with st.expander("📚 Documentos de origem (trechos do RAG)"):
         st.caption(
             "Texto enviado ao modelo junto com sua pergunta. "
-            "A redação final é feita pelo **Deepseek** com base nesses trechos."
+            f"A redação final é feita pelo **{llm_display_name()}** com base nesses trechos."
         )
         for i, source in enumerate(sources, 1):
             meta = source.get("metadata", {})
             fname = meta.get("filename") or Path(str(meta.get("source", ""))).name
-            page = meta.get("page")
+            page = meta.get("page_label") or meta.get("page")
+            section = meta.get("section") or ""
+            ctype = meta.get("content_type") or ""
             header = f"**Fonte {i}**"
             if fname:
                 header += f" — `{fname}`"
             if page is not None:
                 header += f" (pág. {page})"
+            if section:
+                header += f" · _{section[:60]}_"
+            if ctype:
+                header += f" · [{ctype}]"
             st.markdown(header)
             st.markdown(source.get("content", "N/A")[:preview_len] + "...")
 
@@ -730,6 +779,10 @@ def render_sidebar(settings, reindex_documents, RAGChain):
                     st.info(
                         f"**Coleção:** {info.get('name', 'N/A')}\n\n"
                         f"**Chunks:** {info.get('count', 0)}\n\n"
+                        f"**Busca híbrida:** {'sim' if info.get('hybrid_search') else 'não'} "
+                        f"(BM25: {'ok' if info.get('bm25_ready') else 'pendente reindex'})\n\n"
+                        f"**Reranker:** {info.get('reranker_model') or 'desativado'}\n\n"
+                        f"**Metadados:** {', '.join(info.get('metadata_fields', [])) or 'N/A'}\n\n"
                         f"**Pasta:** `{info.get('persist_directory', 'N/A')}`"
                     )
                 except Exception as e:
@@ -768,7 +821,7 @@ def render_sidebar(settings, reindex_documents, RAGChain):
         st.markdown(
             f"""
             **Stack**
-            - LLM: Deepseek
+            - LLM: {llm_display_name()}
             - Vetores: ChromaDB
             - Chunk: {settings.max_chunk_size}
             """

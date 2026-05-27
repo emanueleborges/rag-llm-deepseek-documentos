@@ -1,7 +1,7 @@
 """Vector index versioning and reindex helpers."""
 from pathlib import Path
 
-from src.config import DEFAULT_INDEX_VERSION, settings
+from src.config import DEFAULT_INDEX_VERSION, settings, current_index_version
 from src.logger import logger
 from src.modules.document_processor import DocumentProcessor
 from src.modules.vector_store import VectorStoreManager
@@ -17,12 +17,12 @@ def needs_reindex() -> bool:
     if not marker.exists():
         return True
     stored = marker.read_text(encoding="utf-8").strip()
-    return stored != DEFAULT_INDEX_VERSION
+    return stored != current_index_version()
 
 
 def mark_indexed() -> None:
     settings.vector_store_dir.mkdir(parents=True, exist_ok=True)
-    _marker_path().write_text(DEFAULT_INDEX_VERSION, encoding="utf-8")
+    _marker_path().write_text(current_index_version(), encoding="utf-8")
 
 
 def reindex_documents(

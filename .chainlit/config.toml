@@ -1,0 +1,13 @@
+[project]
+name = "RAG Agent CDC"
+enable_telemetry = false
+user_env = []
+session_timeout = 3600
+
+[UI]
+name = "Assistente CDC"
+default_collapse_content = true
+hide_cot = false
+
+[meta]
+generated_by = "1.3.2"

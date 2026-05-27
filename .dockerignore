@@ -23,18 +23,23 @@ __pycache__
 htmlcov
 .tox
 
-# Dados gerados localmente (montados via volumes no compose)
-data/vector_store
-logs
+# Dados (montados via volumes)
+data/
+logs/
 *.log
 
-# Cache e temporários
+# Cache
 .cache
 .streamlit
 *.tmp
 .DS_Store
 Thumbs.db
 
-# Documentação e testes (não necessários na imagem)
+# Não necessários na imagem
 tests.py
+examples.py
+eval/
+*.md
+ROADMAP.md
 QUICKSTART.md
+agent-transcripts/

@@ -1,38 +1,34 @@
-services:
-  api:
-    build: .
-    image: rag-agent:latest
-    container_name: rag-api
-    restart: unless-stopped
-    ports:
-      - "${API_PORT:-8000}:8000"
-    env_file:
-      - .env
-    environment:
-      API_HOST: 0.0.0.0
-      API_PORT: 8000
-      API_WORKERS: 1
-      VECTOR_STORE_PATH: /app/data/vector_store
-      DOCUMENTS_PATH: /app/data/documents
-      LOG_FILE: /app/logs/rag_agent.log
-    volumes:
-      - ./data/documents:/app/data/documents
-      - ./data/vector_store:/app/data/vector_store
-      - ./logs:/app/logs
-    command:
-      - sh
-      - -c
-      - |
-        python -c "import langchain_text_splitters" 2>/dev/null || pip install --no-cache-dir langchain-core==0.2.43 langchain-community==0.2.19 langchain-text-splitters==0.2.4
-        exec python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 180s
+# Build mínimo — só UI (padrão):
+#   docker compose build ui && docker compose up -d ui
+#
+# Extras:
+#   docker compose --profile api up -d api
+#   docker compose --profile qdrant up -d qdrant
+#   docker compose --profile chainlit up -d chainlit
 
+x-app-env: &app-env
+  VECTOR_STORE_PATH: /app/data/vector_store
+  DOCUMENTS_PATH: /app/data/documents
+  LOG_FILE: /app/logs/rag_agent.log
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+  LLM_PROVIDER: ollama
+  PDF_PARSER: pypdf
+  EMBEDDINGS_PROVIDER: ollama
+  OLLAMA_EMBEDDING_MODEL: nomic-embed-text
+  RERANKER_ENABLED: "false"
+  LANGGRAPH_ENABLED: "false"
+  HYBRID_SEARCH_ENABLED: "true"
+  HYBRID_FETCH_K: "15"
+  RERANK_TOP_K: "5"
+  RETRIEVAL_K: "10"
+  MAX_CONTEXT_CHARS: "7000"
+  OLLAMA_NUM_PREDICT: "768"
+  OLLAMA_NUM_CTX: "4096"
+  CONTEXT_GRADER_ENABLED: "false"
+
+services:
   ui:
+    build: .
     image: rag-agent:latest
     container_name: rag-ui
     restart: unless-stopped
@@ -41,17 +37,116 @@ services:
     env_file:
       - .env
     environment:
-      VECTOR_STORE_PATH: /app/data/vector_store
-      DOCUMENTS_PATH: /app/data/documents
-      LOG_FILE: /app/logs/rag_agent.log
+      <<: *app-env
     volumes:
       - ./src:/app/src:ro
       - ./data/documents:/app/data/documents
       - ./data/vector_store:/app/data/vector_store
       - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command:
       - sh
       - -c
       - |
-        python -c "import langchain_text_splitters" 2>/dev/null || pip install --no-cache-dir langchain-core==0.2.43 langchain-community==0.2.19 langchain-text-splitters==0.2.4
         exec streamlit run src/ui/app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false
+
+  api:
+    profiles: [api]
+    image: rag-agent:latest
+    container_name: rag-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      <<: *app-env
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    volumes:
+      - ./src:/app/src:ro
+      - ./data/documents:/app/data/documents
+      - ./data/vector_store:/app/data/vector_store
+      - ./data/feedback:/app/data/feedback
+      - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - sh
+      - -c
+      - |
+        pip install --no-cache-dir 'fastapi>=0.115.3' 'uvicorn>=0.25.0' 'starlette>=0.41.2'
+        exec python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+
+  chainlit:
+    profiles: [chainlit]
+    image: rag-agent:latest
+    container_name: rag-chainlit
+    restart: unless-stopped
+    ports:
+      - "${CHAINLIT_PORT:-8502}:8502"
+    env_file:
+      - .env
+    environment:
+      <<: *app-env
+    volumes:
+      - ./src:/app/src:ro
+      - ./.chainlit:/app/.chainlit:ro
+      - ./data/documents:/app/data/documents
+      - ./data/vector_store:/app/data/vector_store
+      - ./data/feedback:/app/data/feedback
+      - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - sh
+      - -c
+      - |
+        pip install --no-cache-dir 'chainlit==1.3.2'
+        exec chainlit run src/ui/chainlit_app.py --host 0.0.0.0 --port 8502 --headless
+
+  qdrant:
+    profiles: [qdrant]
+    image: qdrant/qdrant:latest
+    container_name: rag-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - ./data/qdrant_storage:/qdrant/storage
+
+  langfuse-db:
+    profiles: [observability]
+    image: postgres:16-alpine
+    container_name: rag-langfuse-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-postgres}
+      POSTGRES_DB: langfuse
+    volumes:
+      - ./data/langfuse_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse:
+    profiles: [observability]
+    image: langfuse/langfuse:2
+    container_name: rag-langfuse
+    restart: unless-stopped
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:${LANGFUSE_DB_PASSWORD:-postgres}@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-change-me-use-openssl-rand-hex-32}
+      SALT: ${LANGFUSE_SALT:-change-me-use-openssl-rand-hex-32}
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3000}
+      TELEMETRY_ENABLED: "false"
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      langfuse-db:
+        condition: service_healthy

@@ -51,8 +51,11 @@ logs/
 *.sqlite
 *.sqlite3
 
-# Vector stores
+# Vector stores & infra self-hosted
 data/vector_store/
+data/qdrant_storage/
+data/langfuse_db/
+data/ollama/
 chroma_data/
 
 # Cache
@@ -77,6 +80,8 @@ Thumbs.db
 .DS_Store
 
 # Project specific
+data/feedback/
+eval/reports/
 *.ipynb_checkpoints
 .streamlit/
 .ipynb

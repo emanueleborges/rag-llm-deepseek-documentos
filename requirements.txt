@@ -1,38 +1,13 @@
-# Core Dependencies
-python-dotenv==1.0.0
-pydantic==2.5.0
+# Runtime completo (local) — inclui Docker mínimo + extras opcionais
+-r requirements-docker.txt
 
-# LangChain (versões alinhadas)
-langchain-core==0.2.43
-langchain-community==0.2.19
-langchain-text-splitters==0.2.4
+# Embeddings locais sem Ollama (ONNX ~150 MB extra no build)
+fastembed>=0.3.0
 
-# LLM & Embeddings
-openai==1.3.5
-requests==2.31.0
+# API FastAPI (profile api no Docker instala no startup)
+fastapi>=0.115.3,<0.116
+uvicorn>=0.25.0,<0.35
+starlette>=0.41.2,<0.42
 
-# Vector Store & Document Processing
-chromadb==0.4.18
-pypdf==3.17.1
-python-docx==0.8.11
-
-# API Framework
-fastapi==0.104.1
-uvicorn==0.24.0
-pydantic-settings==2.1.0
-
-# UI Framework
-streamlit==1.28.1
-
-# Utilities
-beautifulsoup4==4.12.2
-lxml==4.9.3
-typing-extensions==4.8.0
-
-# Development
-pytest==7.4.3
-black==23.12.0
-flake8==6.1.0
-
-# Embeddings semânticos (obrigatório para busca no CDC)
-sentence-transformers>=2.2.0
+# Extras dev/eval (instale só se precisar):
+# pip install langgraph chainlit langfuse ragas sentence-transformers pymupdf pytest black

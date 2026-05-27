@@ -2,9 +2,11 @@
 RAG Chain implementation for RAG Agent
 Combines retrieval and generation with Deepseek
 """
+import json
 import re
+import time
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, Generator, Iterator, List, Optional
 import httpx
 
 from langchain_core.documents import Document
@@ -179,23 +181,48 @@ class DeepseekLLM:
             logger.error(f"Error calling Deepseek API: {e}")
             return f"Erro ao consultar a API: {e}"
 
+    def stream(self, input: Any, **kwargs: Any) -> Iterator[str]:
+        """Stream tokens from Deepseek API (SSE)."""
+        if not self.api_key or self.api_key == "your_deepseek_api_key_here":
+            yield "Configure sua DEEPSEEK_API_KEY no arquivo .env para obter respostas reais."
+            return
 
-# Terms that boost relevance for consumer-law questions
-_CDC_BOOST_TERMS = frozenset({
-    "consumidor", "consumidores", "fornecedor", "cdc", "defesa",
-    "contrato", "contratos", "cláusula", "cláusulas", "abusiva",
-    "responsabilidade", "produto", "serviço", "servicos", "direito",
-    "arrependimento", "internet", "eletrônico", "eletronico", "comércio",
-    "comercio", "publicidade", "garantia", "cobrança", "cobranca",
-    "crédito", "credito", "coletiva", "coletivo", "sanção", "sancao",
-    "8078", "7962", "8078/1990",
-})
+        messages = self._to_api_messages(input)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
 
-# Annex topics often retrieved incorrectly for general CDC questions
-_IRRELEVANT_FOR_OVERVIEW = (
-    "biossegurança", "biosseguranca", "ctnbio", "transgênico", "transgenico",
-    "água potável", "agua potavel", "conta mensal de água",
-)
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                with client.stream(
+                    "POST",
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data = line[6:].strip()
+                        if data == "[DONE]":
+                            break
+                        chunk = json.loads(data)
+                        delta = chunk["choices"][0].get("delta", {})
+                        content = delta.get("content") or ""
+                        if content:
+                            yield content
+        except Exception as e:
+            logger.error(f"Error streaming from Deepseek API: {e}")
+            yield f"Erro ao consultar a API: {e}"
 
 
 class RAGChain:
@@ -211,11 +238,10 @@ class RAGChain:
         self.streaming = streaming
 
         if llm is None:
-            logger.info("Creating default Deepseek LLM")
-            self.llm = DeepseekLLM(
-                temperature=settings.deepseek_temperature,
-                max_tokens=settings.deepseek_max_tokens,
-            )
+            from src.modules.llm_factory import LLMFactory
+
+            self.llm = LLMFactory.create_llm()
+            logger.info("LLM provider: %s", settings.llm_provider)
         else:
             self.llm = llm
 
@@ -228,48 +254,19 @@ class RAGChain:
             ("human", "Pergunta: {question}\n\nResposta:"),
         ])
 
+        self._langgraph = None
+        if settings.langgraph_enabled:
+            try:
+                from src.agents.graph import build_rag_graph
+                self._langgraph = build_rag_graph(self)
+                logger.info("LangGraph RAG agent enabled")
+            except ImportError as exc:
+                logger.warning("LangGraph unavailable (%s) — using linear pipeline", exc)
+
         logger.info("RAG Chain initialized successfully")
 
     def _tokenize(self, text: str) -> set:
         return set(re.findall(r"\w+", text.lower(), flags=re.UNICODE))
-
-    def _rerank_documents(
-        self, question: str, docs: List[Document], top_k: int = None
-    ) -> List[Document]:
-        """Re-rank by keyword overlap and CDC-related terms."""
-        if not docs:
-            return []
-
-        top_k = top_k or settings.rerank_top_k
-        q_terms = self._tokenize(question)
-        wants_overview = bool(
-            q_terms
-            & {"resumo", "visão", "visao", "geral", "overview", "direito", "cdc", "consumidor"}
-        )
-
-        def score(doc: Document) -> float:
-            text = doc.page_content.lower()
-            doc_terms = self._tokenize(text)
-
-            overlap = len(q_terms & doc_terms)
-            cdc_boost = sum(3 for t in _CDC_BOOST_TERMS if t in text)
-            penalty = 0.0
-
-            if wants_overview and any(term in text for term in _IRRELEVANT_FOR_OVERVIEW):
-                penalty -= 8.0
-
-            # Prefer chunks with structural CDC markers
-            if re.search(r"art\.\s*\d+", text, re.IGNORECASE):
-                cdc_boost += 2
-            if "código de defesa do consumidor" in text or "codigo de defesa do consumidor" in text:
-                cdc_boost += 4
-            if "título" in text or "capítulo" in text or "capitulo" in text:
-                cdc_boost += 1
-
-            return overlap + cdc_boost + penalty
-
-        ranked = sorted(docs, key=score, reverse=True)
-        return ranked[:top_k]
 
     def _is_overview_question(self, question: str) -> bool:
         q = question.lower()
@@ -281,29 +278,42 @@ class RAGChain:
         )
         return any(t in q for t in overview_terms)
 
-    def _retrieve_documents(self, question: str) -> List[Document]:
+    def _build_retrieval_queries(self, question: str) -> List[str]:
         queries = [question]
         if self._is_overview_question(question):
-            queries.extend([
-                "Código de Defesa do Consumidor Lei 8078 objetivo política nacional relações de consumo",
-                "definição consumidor fornecedor produto serviço artigo 2 artigo 3",
-                "direitos básicos do consumidor artigo 6 CDC",
-                "CÓDIGO DE PROTEÇÃO E DEFESA DO CONSUMIDOR",
-            ])
+            # Uma query extra basta (antes eram 4 — 5× mais lento com Ollama embeddings)
+            queries.append(
+                "CDC Lei 8078 direitos básicos do consumidor definição fornecedor"
+            )
+        return queries
 
+    def _retrieve_from_queries(
+        self, queries: List[str], question: str
+    ) -> List[Document]:
         seen: set = set()
         merged: List[Document] = []
-        per_query_k = max(8, settings.retrieval_k // len(queries))
+        n_queries = max(len(queries), 1)
+        per_query_k = min(settings.hybrid_fetch_k, max(8, settings.hybrid_fetch_k // n_queries))
+        overview = self._is_overview_question(question)
 
         for q in queries:
-            for doc in self.vector_store_manager.similarity_search(q, k=per_query_k):
+            for doc in self.vector_store_manager.advanced_search(
+                q,
+                k=per_query_k,
+                rerank_top_k=settings.rerank_top_k + (1 if overview else 0),
+            ):
                 key = doc.page_content[:300]
                 if key not in seen:
                     seen.add(key)
                     merged.append(doc)
 
-        top_k = settings.rerank_top_k + (4 if self._is_overview_question(question) else 0)
-        return self._rerank_documents(question, merged, top_k=top_k)
+        top_k = settings.rerank_top_k + (2 if overview else 0)
+        return merged[:top_k]
+
+    def _retrieve_documents(self, question: str) -> List[Document]:
+        return self._retrieve_from_queries(
+            self._build_retrieval_queries(question), question
+        )
 
     def _source_filenames(self, docs: List[Document]) -> List[str]:
         names = []
@@ -346,10 +356,11 @@ class RAGChain:
         """
         Define modo de resposta:
         - strict: só contexto CDC (RAG)
-        - fallback: Deepseek complementa quando o índice não cobre a pergunta
+        - fallback: LLM local complementa quando o índice não cobre a pergunta
         """
+        llm = self._llm_label()
         if not docs:
-            return "fallback", "Nenhum trecho recuperado — usando Deepseek."
+            return "fallback", f"Nenhum trecho recuperado — usando {llm}."
 
         combined = "\n".join(d.page_content.lower() for d in docs)
 
@@ -358,7 +369,7 @@ class RAGChain:
             "código de defesa", "codigo de defesa", "lei nº 8.078",
         )
         if not any(m in combined for m in cdc_markers):
-            return "fallback", "Trechos não parecem CDC — usando Deepseek."
+            return "fallback", f"Trechos não parecem CDC — usando {llm}."
 
         if self._is_overview_question(question):
             return "strict", "Pergunta de visão geral do CDC."
@@ -372,7 +383,7 @@ class RAGChain:
             missing = ", ".join(labels.get(i, i) for i in sorted(intents))
             return (
                 "fallback",
-                f"CDC indexado não detalha ({missing}) — complemento Deepseek.",
+                f"CDC indexado não detalha ({missing}) — complemento {llm}.",
             )
 
         q_terms = [
@@ -394,12 +405,17 @@ class RAGChain:
                 return "strict", "1 termo da pergunta no contexto."
 
         if intents:
-            return "fallback", "Menção ao tema sem detalhe procedimental — Deepseek."
+            return "fallback", f"Menção ao tema sem detalhe procedimental — {llm}."
 
         return (
             "fallback",
-            "Tema não coberto pelos trechos indexados — complemento Deepseek.",
+            f"Tema não coberto pelos trechos indexados — complemento {llm}.",
         )
+
+    def _llm_label(self) -> str:
+        from src.modules.llm_factory import LLMFactory
+
+        return LLMFactory.display_name()
 
     def _generate_answer(
         self, question: str, docs: List[Document], mode: str
@@ -423,58 +439,275 @@ class RAGChain:
             "source_files": files,
             "source_label": ", ".join(files),
             "retrieval_note": note,
+            "retrieval": {
+                "hybrid": settings.hybrid_search_enabled,
+                "reranker": settings.reranker_enabled,
+            },
         }
 
     def _format_context(self, docs: List[Document]) -> str:
         parts = []
+        total_chars = 0
+        max_chars = settings.max_context_chars
+
         for i, doc in enumerate(docs, 1):
-            source = doc.metadata.get("source", "desconhecida")
-            page = doc.metadata.get("page")
+            meta = doc.metadata
+            source = meta.get("source", "desconhecida")
+            page = meta.get("page_label") or meta.get("page")
+            section = meta.get("section") or ""
+            content_type = meta.get("content_type") or "text"
+
             header = f"[Trecho {i}"
             if source:
                 header += f" | {Path(str(source)).name}"
             if page is not None:
                 header += f" | pág. {page}"
-            header += "]"
-            parts.append(f"{header}\n{doc.page_content}")
+            if section:
+                header += f" | {section[:80]}"
+            header += f" | tipo: {content_type}]"
+
+            body = doc.page_content
+            block = f"{header}\n{body}"
+            if total_chars + len(block) > max_chars:
+                remaining = max_chars - total_chars - len(header) - 20
+                if remaining > 200:
+                    block = f"{header}\n{body[:remaining]}…"
+                    parts.append(block)
+                break
+            parts.append(block)
+            total_chars += len(block)
+
         return "\n\n---\n\n".join(parts)
 
-    def query(self, question: str) -> Dict[str, Any]:
+    def prepare_retrieval(
+        self,
+        question: str,
+        conversation_context: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Retrieval + grade alinhado ao LangGraph (sem geração).
+        Usado por streaming (WebSocket / Chainlit).
+        """
+        from src.agents.nodes import REWRITE_PROMPT
+        from src.agents.web_search import search_web
+
+        graph_trace: List[str] = ["analyze_query"]
+        queries = self._build_retrieval_queries(question)
+        attempts = 0
+        docs: List[Document] = []
+        mode = "fallback"
+        note = ""
+        web_context = ""
+
+        while True:
+            docs = self._retrieve_from_queries(queries, question)
+            graph_trace.append("retrieve")
+            mode, note = self._assess_retrieval_mode(question, docs)
+
+            if not docs and attempts < settings.max_retrieval_retries:
+                graph_trace.append(f"grade:{mode}->rewrite")
+                messages = REWRITE_PROMPT.format_messages(question=question)
+                rewritten = str(self.llm.invoke(messages)).strip() or question
+                queries = [rewritten]
+                attempts += 1
+                graph_trace.append("rewrite_query")
+                continue
+
+            if mode == "fallback" and not docs and settings.tavily_api_key.strip():
+                graph_trace.append(f"grade:{mode}->web_search")
+                web_context = search_web(question)
+                if web_context:
+                    note = f"{note} Complemento web (Tavily).".strip()
+                graph_trace.append("web_search")
+
+            graph_trace.append(f"grade:{mode}->generate")
+            break
+
+        formatted_question = question
+        if conversation_context.strip():
+            formatted_question = (
+                f"Contexto da conversa:\n{conversation_context}\n\n"
+                f"Pergunta atual: {question}"
+            )
+
+        meta = self._build_meta(docs, mode, note)
+        if settings.langgraph_enabled:
+            meta["langgraph"] = True
+            meta["graph_trace"] = graph_trace
+        if web_context:
+            meta["web_enriched"] = True
+
+        return {
+            "question": formatted_question,
+            "raw_question": question,
+            "documents": docs,
+            "mode": mode,
+            "web_context": web_context,
+            "meta": meta,
+            "sources": [
+                {"content": doc.page_content, "metadata": doc.metadata}
+                for doc in docs
+            ],
+        }
+
+    def _build_llm_messages_for_context(self, ctx: Dict[str, Any]) -> list:
+        docs = ctx.get("documents") or []
+        mode = ctx.get("mode") or "fallback"
+        web_context = ctx.get("web_context") or ""
+
+        context = self._format_context(docs) if docs else ""
+        if web_context:
+            context += (
+                "\n\n---\n\n[Complemento web — não substitui o CDC indexado]\n"
+                + web_context
+            )
+        if not context.strip():
+            context = "(Nenhum trecho relevante recuperado da base indexada.)"
+
+        template = self.prompt if mode == "strict" else self.fallback_prompt
+        return template.format_messages(
+            context=context,
+            question=ctx["question"],
+        )
+
+    def stream_answer_from_context(self, ctx: Dict[str, Any]) -> Iterator[str]:
+        messages = self._build_llm_messages_for_context(ctx)
+        yield from self.llm.stream(messages)
+
+    def query_stream(
+        self,
+        question: str,
+        conversation_context: str = "",
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Generator síncrono de eventos para clientes streaming."""
+        yield {"type": "status", "message": f"Consultando CDC e {self._llm_label()}..."}
+        ctx = self.prepare_retrieval(question, conversation_context)
+        yield {"type": "meta", "meta": ctx["meta"], "sources": ctx["sources"]}
+
+        full_answer = ""
+        for token in self.stream_answer_from_context(ctx):
+            full_answer += token
+            yield {"type": "token", "content": token}
+
+        yield {
+            "type": "done",
+            "answer": full_answer,
+            "meta": ctx["meta"],
+            "sources": ctx["sources"],
+        }
+
+    def query(
+        self,
+        question: str,
+        conversation_context: str = "",
+    ) -> Dict[str, Any]:
         """Run a query through the RAG chain"""
+        from src.observability.tracer import trace_rag_query
+
+        started = time.perf_counter()
         try:
             logger.info(f"Processing query: {question}")
 
-            docs = self._retrieve_documents(question)
-            mode, relevance_note = self._assess_retrieval_mode(question, docs)
-            meta = self._build_meta(docs, mode, relevance_note)
+            if self._langgraph is not None:
+                result = self._query_via_graph(question, conversation_context)
+            else:
+                result = self._query_linear(question, conversation_context)
 
-            answer_str = self._generate_answer(question, docs, mode)
-
-            max_chars = settings.log_answer_max_chars
-            logged_answer = answer_str
-            if len(logged_answer) > max_chars:
-                logged_answer = f"{logged_answer[:max_chars]}... [truncado no log]"
-
-            logger.info(
-                "Query processed | sources=%s | mode=%s | %s",
-                len(docs),
-                mode,
-                relevance_note,
-            )
-            logger.info("Answer:\n%s", logged_answer)
-
-            return {
-                "answer": answer_str,
-                "sources": [
-                    {"content": doc.page_content, "metadata": doc.metadata}
-                    for doc in docs
-                ],
-                "meta": meta,
-            }
+            duration_ms = (time.perf_counter() - started) * 1000
+            trace_rag_query(question, result, duration_ms, conversation_context)
+            return result
 
         except Exception as e:
             logger.error(f"Error processing query: {e}")
             raise
+
+    def _query_linear(
+        self,
+        question: str,
+        conversation_context: str = "",
+    ) -> Dict[str, Any]:
+        docs = self._retrieve_documents(question)
+        mode, relevance_note = self._assess_retrieval_mode(question, docs)
+        meta = self._build_meta(docs, mode, relevance_note)
+
+        q = question
+        if conversation_context.strip():
+            q = (
+                f"Contexto da conversa:\n{conversation_context}\n\n"
+                f"Pergunta atual: {question}"
+            )
+
+        answer_str = self._generate_answer(q, docs, mode)
+
+        max_chars = settings.log_answer_max_chars
+        logged_answer = answer_str
+        if len(logged_answer) > max_chars:
+            logged_answer = f"{logged_answer[:max_chars]}... [truncado no log]"
+
+        logger.info(
+            "Query processed | sources=%s | mode=%s | %s",
+            len(docs),
+            mode,
+            relevance_note,
+        )
+        logger.info("Answer:\n%s", logged_answer)
+
+        return {
+            "answer": answer_str,
+            "sources": [
+                {"content": doc.page_content, "metadata": doc.metadata}
+                for doc in docs
+            ],
+            "meta": meta,
+        }
+
+    def _query_via_graph(
+        self,
+        question: str,
+        conversation_context: str = "",
+    ) -> Dict[str, Any]:
+        initial = {
+            "question": question,
+            "conversation_context": conversation_context,
+            "retrieval_attempts": 0,
+            "graph_trace": [],
+            "documents": [],
+        }
+        final = self._langgraph.invoke(initial)
+
+        docs = final.get("documents") or []
+        mode = final.get("mode") or "fallback"
+        note = final.get("relevance_note") or ""
+        trace = final.get("graph_trace") or []
+
+        meta = self._build_meta(docs, mode, note)
+        meta["langgraph"] = True
+        meta["graph_trace"] = trace
+        if final.get("web_context"):
+            meta["web_enriched"] = True
+
+        answer_str = final.get("answer", "")
+        max_chars = settings.log_answer_max_chars
+        logged = answer_str
+        if len(logged) > max_chars:
+            logged = f"{logged[:max_chars]}... [truncado no log]"
+        logger.info(
+            "Query processed (LangGraph) | trace=%s | sources=%s | mode=%s | %s",
+            " → ".join(trace),
+            len(docs),
+            mode,
+            note,
+        )
+        logger.info("Answer:\n%s", logged)
+
+        return {
+            "answer": answer_str,
+            "sources": [
+                {"content": doc.page_content, "metadata": doc.metadata}
+                for doc in docs
+            ],
+            "meta": meta,
+        }
 
     def batch_query(self, questions: List[str]) -> List[Dict[str, Any]]:
         results = []
